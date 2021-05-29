@@ -10,91 +10,6 @@ from .transforms import make_filterbanks, ComplexNorm
 
 
 class Transformer(nn.Module):
-    def __init__(
-            self,
-            nb_bins=4096,
-            input_mean=None,
-            input_scale=None,
-            max_bin=None,
-            d_model=2049,
-            nhead=3,
-            dim_feedforward=1024,
-            dropout=0.1,
-            activation="relu",
-            num_encoder_layers=6
-    ):
-        super(Transformer, self).__init__()
-
-        self.nb_output_bins = nb_bins
-        if max_bin:
-            self.nb_bins = max_bin
-        else:
-            self.nb_bins = self.nb_output_bins
-
-        if input_mean is not None:
-            input_mean = torch.from_numpy(-input_mean[: self.nb_bins]).float()
-        else:
-            input_mean = torch.zeros(self.nb_bins)
-
-        if input_scale is not None:
-            input_scale = torch.from_numpy(1.0 / input_scale[: self.nb_bins]).float()
-        else:
-            input_scale = torch.ones(self.nb_bins)
-
-        self.input_mean = Parameter(input_mean)
-        self.input_scale = Parameter(input_scale)
-
-        self.output_scale = Parameter(torch.ones(self.nb_output_bins).float())
-        self.output_mean = Parameter(torch.ones(self.nb_output_bins).float())
-
-        encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation)
-        self.transformer_encoder = TransformerEncoder(encoder_layer, num_encoder_layers)
-
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Args:
-            x: input spectrogram of shape
-                `(nb_samples, nb_channels, nb_bins, nb_frames)`
-
-        Returns:
-            Tensor: filtered spectrogram of shape
-                `(nb_samples, nb_channels, nb_bins, nb_frames)`
-        """
-        # permute so that batch is last for lstm
-        # x = x.permute(3, 0, 1, 2)
-        # get current spectrogram shape
-        nb_samples, nb_channels, nb_bins, nb_frames = x.data.shape
-        # nb_bins, nb_samples, nb_channels, nb_frames = x.data.shape
-        mix = x.detach().clone()
-
-        # crop
-        # x = x[..., : self.nb_bins]
-        # shift and scale input to mean=0 std=1 (across all bins)
-        # x = x + self.input_mean
-        # x = x * self.input_scale
-
-        x = x.permute(0, 1, 3, 2)
-        x = x.reshape(nb_samples * nb_channels, nb_frames, nb_bins)
-        # to (nb_frames*nb_samples, nb_channels*nb_bins)
-        # and encode to (nb_frames*nb_samples, hidden_size)
-        x = self.transformer_encoder(x)
-
-        # reshape back to original dim
-        x = x.reshape(nb_samples, nb_channels, nb_frames, nb_bins)
-        x = x.permute(0, 1, 3, 2)
-
-        # apply output scaling
-        # x *= self.output_scale
-        # x += self.output_mean
-
-        # since our output is non-negative, we can apply RELU
-        # Here is Unmixing step
-        x = F.relu(x) * mix
-        # permute back to (nb_samples, nb_channels, nb_bins, nb_frames)
-        return x
-
-
-class OpenUnmix(nn.Module):
     """OpenUnmix Core spectrogram based separation module.
 
     Args:
@@ -124,12 +39,213 @@ class OpenUnmix(nn.Module):
             input_scale=None,
             max_bin=None,
             # change
-            d_model=512,
-            nhead=4,
+            d_model=806,
+            nhead=2,
             dim_feedforward=512,
-            dropout=0.4,
+            dropout=0.5,
             activation="relu",
             num_encoder_layers=3
+    ):
+        super(Transformer, self).__init__()
+
+        self.nb_output_bins = nb_bins
+        if max_bin:
+            self.nb_bins = max_bin
+        else:
+            self.nb_bins = self.nb_output_bins
+
+        self.hidden_size = hidden_size
+
+        self.conv1 = nn.Conv2d(2, 64, (16, 8), (8, 4), (4, 2))
+        self.bn1 = BatchNorm2d(64)
+
+        self.conv2 = nn.Conv2d(64, 128, (8, 8), (4, 4), (2, 2))
+        self.bn2 = BatchNorm2d(128)
+
+        self.conv3 = nn.ConvTranspose2d(128, 64, (8, 8), (4, 4), (2, 2))
+        self.bn3 = BatchNorm2d(64)
+
+        self.conv4 = nn.ConvTranspose2d(64, 2, (16, 8), (8, 4), (4, 2))
+        self.bn4 = BatchNorm2d(2)
+
+        self.fc2 = Linear(in_features=1024, out_features=512, bias=False)
+        self.bn6 = BatchNorm1d(512)
+
+        self.fc3 = Linear(
+            in_features=1024,
+            out_features=self.nb_output_bins,
+            bias=False,
+        )
+
+        # self.fc4 = Linear(
+        #     in_features=254,
+        #     out_features=255,
+        #     bias=False,
+        # )
+
+        # self.bn5 = BatchNorm2d(2)
+
+        if input_mean is not None:
+            input_mean = torch.from_numpy(-input_mean[: self.nb_bins]).float()
+        else:
+            input_mean = torch.zeros(self.nb_bins)
+
+        if input_scale is not None:
+            input_scale = torch.from_numpy(1.0 / input_scale[: self.nb_bins]).float()
+        else:
+            input_scale = torch.ones(self.nb_bins)
+
+        self.input_mean = Parameter(input_mean)
+        self.input_scale = Parameter(input_scale)
+
+        self.output_scale = Parameter(torch.ones(self.nb_output_bins).float())
+        self.output_mean = Parameter(torch.ones(self.nb_output_bins).float())
+        # change
+
+        encoder_layer = TransformerEncoderLayer(512, 2, dim_feedforward, dropout, activation)
+        self.transformer_encoder = TransformerEncoder(encoder_layer, num_encoder_layers)
+
+        encoder_layer2 = TransformerEncoderLayer(128, 2, dim_feedforward, dropout, activation)
+        self.transformer_encoder2 = TransformerEncoder(encoder_layer2, num_encoder_layers)
+
+    def freeze(self):
+        # set all parameters as not requiring gradient, more RAM-efficient
+        # at test time
+        for p in self.parameters():
+            p.requires_grad = False
+        self.eval()
+
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Args:
+            x: input spectrogram of shape
+                `(nb_samples, nb_channels, nb_bins, nb_frames)`
+
+        Returns:
+            Tensor: filtered spectrogram of shape
+                `(nb_samples, nb_channels, nb_bins, nb_frames)`
+        """
+
+        # permute so that batch is last for lstm
+        x = x.permute(3, 0, 1, 2)
+        # get current spectrogram shape
+        nb_frames, nb_samples, nb_channels, nb_bins = x.data.shape
+
+        mix = x.detach().clone()
+
+        # batchify x to [nbatch, nb_channels, nb_bins, nframes] (for validation and test)
+        nframes = 255
+        nbatch = nb_samples
+        if nb_frames > nframes:
+            nbatch = (nb_frames // nframes) + 1
+            x = F.pad(input=x, pad=(0, 0, 0, 0, 0, 0, 0, nframes - (nb_frames % nframes)), mode='constant', value=0)
+            x = x.reshape(nframes, -1, nb_channels, nb_bins)
+
+        # crop
+        x = x[..., : self.nb_bins]
+
+        x = F.pad(input=x, pad=(0, 0, 0, 0, 0, 0, 0, 1), mode='constant', value=0)
+        # shift and scale input to mean=0 std=1 (across all bins)
+        x = x + self.input_mean
+        x = x * self.input_scale
+
+        # (16, 2, 1024, 256) --> (16, 64, 128, 128)
+        conv1 = self.conv1(x.permute(1, 2, 3, 0))
+        x = self.bn1(conv1)
+        x = F.relu(x)
+
+        # (16, 64, 128, 128) --> (16, 128, 16, 64)
+        conv2 = self.conv2(x)
+        x = self.bn2(conv2)
+        x = torch.tanh(x)
+
+        x = x.permute(1, 0, 2, 3)
+        x = x.reshape(x.shape[0], x.shape[1], -1)
+
+        transformer_out = self.transformer_encoder(x)
+        permute_out = transformer_out.permute(2, 1, 0)
+        transformer_out2 = self.transformer_encoder2(permute_out)
+        permute_out2 = transformer_out2.permute(2, 1, 0)
+
+        x = torch.cat([x, permute_out2], -1)
+
+        x = self.fc2(x.reshape(-1, x.shape[-1]))
+        x = self.bn6(x)
+        x = F.relu(x)
+
+        x = x.reshape(128, nbatch, 32, 16)
+        x = x.permute(1, 0, 2, 3)
+
+        # x = torch.cat([x, conv2], 1)
+        x = self.conv3(x)
+        x = self.bn3(x)
+        x = F.relu(x)
+
+        # x = torch.cat([x, conv1], 1)
+        x = self.conv4(x)
+        x = self.bn4(x)
+        x = F.relu(x)
+
+        x = x.narrow(3, 0, 255)
+        x = self.fc3(x.permute(0, 1, 3, 2))
+        # x = self.fc4(x.permute(0, 1, 3, 2))
+        # x = self.bn5(x)
+
+        x = x.permute(2, 0, 1, 3)
+
+        # reshape x to initial shape [1, nb_channels, nb_bins, nb_frames] (for validation and test)
+        if nb_frames > nframes:
+            x = x.reshape(-1, nb_samples, nb_channels, nb_bins)
+            x = x.narrow(0, 0, ((nbatch - 1) * nframes) + (nb_frames % nframes))
+            x = x.reshape(nb_frames, nb_samples, nb_channels, nb_bins)
+
+        # apply output scaling
+        x *= self.output_scale
+        x += self.output_mean
+
+        # since our output is non-negative, we can apply RELU
+        # Here is Unmixing step
+        x = F.relu(x) * mix
+        # permute back to (nb_samples, nb_channels, nb_bins, nb_frames)
+        return x.permute(1, 2, 3, 0)
+
+
+
+class OpenUnmix(nn.Module):
+    """OpenUnmix Core spectrogram based separation module.
+
+    Args:
+        nb_bins (int): Number of input time-frequency bins (Default: `4096`).
+        nb_channels (int): Number of input audio channels (Default: `2`).
+        hidden_size (int): Size for bottleneck layers (Default: `512`).
+        nb_layers (int): Number of Bi-LSTM layers (Default: `3`).
+        unidirectional (bool): Use causal model useful for realtime purpose.
+            (Default `False`)
+        input_mean (ndarray or None): global data mean of shape `(nb_bins, )`.
+            Defaults to zeros(nb_bins)
+        input_scale (ndarray or None): global data mean of shape `(nb_bins, )`.
+            Defaults to ones(nb_bins)
+        max_bin (int or None): Internal frequency bin threshold to
+            reduce high frequency content. Defaults to `None` which results
+            in `nb_bins`
+    """
+    def __init__(
+            self,
+            nb_bins=4096,
+            nb_channels=2,
+            hidden_size=512,
+            nb_layers=3,
+            unidirectional=False,
+            input_mean=None,
+            input_scale=None,
+            max_bin=None,
+            # change
+            # d_model=512,
+            # nhead=2,
+            # dim_feedforward=512,
+            # dropout=0.3,
+            # activation="relu",
+            # num_encoder_layers=3
     ):
         super(OpenUnmix, self).__init__()
 
@@ -142,7 +258,16 @@ class OpenUnmix(nn.Module):
         self.hidden_size = hidden_size
 
         self.fc1 = Linear(self.nb_bins * nb_channels, hidden_size, bias=False)
-
+        # self.conv1 = nn.Conv2d(2, 5, 3)
+        """
+        skipconnection_fcl
+        self.fc1 = Linear(self.nb_bins * nb_channels, 2 * hidden_size, bias=False)
+        self.fc4 = Linear(2 * hidden_size, hidden_size, bias=False)
+        self.bn4 = BatchNorm1d(2 * hidden_size)
+        self.fc5 = Linear(hidden_size, 2 * hidden_size, bias=False)
+        self.bn5 = BatchNorm1d(2 * hidden_size)
+        self.fc6 = Linear(4 * hidden_size, 2 * hidden_size, bias=False)
+        """
         self.bn1 = BatchNorm1d(hidden_size)
 
         if unidirectional:
@@ -159,6 +284,10 @@ class OpenUnmix(nn.Module):
             dropout=0.4 if nb_layers > 1 else 0,
         )
 
+        """
+        three-skipconnection
+        fc2_hiddensize = hidden_size * 3
+        """
         fc2_hiddensize = hidden_size * 2
         self.fc2 = Linear(in_features=fc2_hiddensize, out_features=hidden_size, bias=False)
 
@@ -188,8 +317,25 @@ class OpenUnmix(nn.Module):
         self.output_scale = Parameter(torch.ones(self.nb_output_bins).float())
         self.output_mean = Parameter(torch.ones(self.nb_output_bins).float())
         # change
-        encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation)
-        self.transformer_encoder = TransformerEncoder(encoder_layer, num_encoder_layers)
+        """
+        two-LSTM
+        self.lstm2 = LSTM(
+            input_size=255,
+            hidden_size=128,
+            num_layers=nb_layers,
+            bidirectional=not unidirectional,
+            batch_first=False,
+            dropout=0.4 if nb_layers > 1 else 0,
+        )
+        """
+        # encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation)
+        # self.transformer_encoder = TransformerEncoder(encoder_layer, num_encoder_layers)
+        """
+        Long-Excerpt(12 sec)
+        encoder_layer2 = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation)
+        """
+        # encoder_layer2 = TransformerEncoderLayer(255, 3, dim_feedforward, dropout, activation)
+        # self.transformer_encoder2 = TransformerEncoder(encoder_layer2, num_encoder_layers)
 
     def freeze(self):
         # set all parameters as not requiring gradient, more RAM-efficient
@@ -225,6 +371,12 @@ class OpenUnmix(nn.Module):
         # to (nb_frames*nb_samples, nb_channels*nb_bins)
         # and encode to (nb_frames*nb_samples, hidden_size)
         x = self.fc1(x.reshape(-1, nb_channels * self.nb_bins))
+        # x = self.conv1(x.permute(1, 2, 3, 0))
+        """
+        skipconnection_fcl
+        x_temp = self.bn4(x)
+        x = self.fc4(x_temp)
+        """
         # normalize every instance in a batch
         x = self.bn1(x)
         x = x.reshape(nb_frames, nb_samples, self.hidden_size)
@@ -233,19 +385,41 @@ class OpenUnmix(nn.Module):
 
         # apply 3-layers of stacked LSTM
         # change
-        # lstm_out = self.lstm(x)
-        transformer_out = self.transformer_encoder(x)
-
+        """
+        two-LSTM
+        lstm_out = self.lstm(x)
+        permute_out = lstm_out[0].permute(2, 1, 0)
+        lstm_out2 = self.lstm2(permute_out)
+        lstm_out = lstm_out2[0].permute(2, 1, 0)
+        lstm_out = lstm_out.narrow(0, 0, 255)
+        x = torch.cat([x, lstm_out], -1)
+        """
+        lstm_out = self.lstm(x)
+        # transformer_out = self.transformer_encoder(x)
+        # permute_out = transformer_out.permute(2, 1, 0)
+        # transformer_out2 = self.transformer_encoder2(permute_out)
+        # permute_out2 = transformer_out2.permute(2, 1, 0)
         # lstm skip connection
         # change
-        # x = torch.cat([x, lstm_out[0]], -1)
-        x = torch.cat([x, transformer_out], -1)
+        """
+        x = torch.cat([x, transformer_out, permute_out2], -1)
+        """
+        x = torch.cat([x, lstm_out[0]], -1)
+        # x = torch.cat([x, permute_out2], -1)
         # first dense stage + batch norm
         x = self.fc2(x.reshape(-1, x.shape[-1]))
         x = self.bn2(x)
 
         x = F.relu(x)
-
+        """
+        skipconnection_fcl
+        x = self.fc5(x)
+        x = self.bn5(x)
+        x = torch.cat([x, x_temp], -1)
+        x = self.fc6(x)
+        x = self.bn5(x)
+        x = F.relu(x)
+        """
         # second dense stage + layer norm
         x = self.fc3(x)
         x = self.bn3(x)
