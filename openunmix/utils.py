@@ -147,7 +147,7 @@ def load_target_models(targets, model_str_or_path="umxhq", device="cpu", pretrai
             target_model_path = next(Path(model_path).glob("%s*.pth" % target))
             state = torch.load(target_model_path, map_location=device)
 
-            models[target] = model.OpenUnmix(
+            models[target] = model.Transformer(
                 nb_bins=results["args"]["nfft"] // 2 + 1,
                 nb_channels=results["args"]["nb_channels"],
                 hidden_size=results["args"]["hidden_size"],
