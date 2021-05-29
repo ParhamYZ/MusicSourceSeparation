@@ -14,7 +14,7 @@ except ImportError:
 
 
 def make_filterbanks(n_fft=4096, n_hop=1024, center=False, sample_rate=44100.0, method="torch"):
-    window = nn.Parameter(torch.hann_window(n_fft), requires_grad=False)
+    window = nn.Parameter(torch.blackman_window(n_fft), requires_grad=False)
 
     if method == "torch":
         encoder = TorchSTFT(n_fft=n_fft, n_hop=n_hop, window=window, center=center)
@@ -72,7 +72,7 @@ class TorchSTFT(nn.Module):
     def __init__(self, n_fft=4096, n_hop=1024, center=False, window=None):
         super(TorchSTFT, self).__init__()
         if window is not None:
-            self.window = nn.Parameter(torch.hann_window(n_fft), requires_grad=False)
+            self.window = nn.Parameter(torch.blackman_window(n_fft), requires_grad=False)
         else:
             self.window = window
         self.n_fft = n_fft
@@ -150,7 +150,7 @@ class TorchISTFT(nn.Module):
         self.sample_rate = sample_rate
 
         if window is not None:
-            self.window = nn.Parameter(torch.hann_window(n_fft), requires_grad=False)
+            self.window = nn.Parameter(torch.blackman_window(n_fft), requires_grad=False)
         else:
             self.window = window
 
