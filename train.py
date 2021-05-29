@@ -29,8 +29,17 @@ def train(args, unmix, encoder, device, train_sampler, optimizer):
         x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
         X = encoder(x)
+        # reshape to (nb_samples, nb_channels, 2048, 256)
+        # X = torch.nn.functional.pad(input=X, pad=(0, 1, 0, 0, 0, 0, 0, 0), mode='constant', value=0)
+        # X = X.narrow(2, 0, 2048)
+
         Y_hat = unmix(X)
+
         Y = encoder(y)
+        # reshape to (nb_samples, nb_channels, 2048, 256)
+        # Y = torch.nn.functional.pad(input=Y, pad=(0, 1, 0, 0, 0, 0, 0, 0), mode='constant', value=0)
+        # Y = Y.narrow(2, 0, 2048)
+
         loss = torch.nn.functional.mse_loss(Y_hat, Y)
         loss.backward()
         optimizer.step()
@@ -45,16 +54,20 @@ def valid(args, unmix, encoder, device, valid_sampler):
         for x, y in valid_sampler:
             x, y = x.to(device), y.to(device)
             X = encoder(x)
-            # bachify X to [n, 2, 2049, 255]
-            X = X.narrow(3, 0, (X.shape[3] // 255) * 255)
-            X = X.reshape(-1, 2, 2049, 255)
+            # nframes = 255
+            # bachify X to [n, 2, 2048, nframes]
+            # X = X.narrow(3, 0, (X.shape[3] // nframes) * nframes)
+            # X = X.reshape(-1, 2, 2049, nframes)
+            # X = X.narrow(2, 0, 2048)
 
             Y_hat = unmix(X)
 
             Y = encoder(y)
-            # bachify Y to [n, 2, 2049, 255]
-            Y = Y.narrow(3, 0, (Y.shape[3] // 255) * 255)
-            Y = Y.reshape(-1, 2, 2049, 255)
+            # bachify Y to [n, 2, 2048, nframes]
+            # Y = Y.narrow(3, 0, (Y.shape[3] // nframes) * nframes)
+            # Y = Y.reshape(-1, 2, 2049, nframes)
+            # Y = Y.narrow(2, 0, 2048)
+
             loss = torch.nn.functional.mse_loss(Y_hat, Y)
             losses.update(loss.item(), Y.size(1))
         return losses.avg
@@ -257,21 +270,23 @@ def main():
         scaler_mean, scaler_std = get_statistics(args, encoder, train_dataset)
 
     max_bin = utils.bandwidth_to_max_bin(train_dataset.sample_rate, args.nfft, args.bandwidth)
-
-    unmix = model.OpenUnmix(
-         input_mean=scaler_mean,
-         input_scale=scaler_std,
-         nb_bins=args.nfft // 2 + 1,
-         nb_channels=args.nb_channels,
-         hidden_size=args.hidden_size,
-         max_bin=max_bin,
-    ).to(device)
-    # unmix = model.Transformer(
-    #    input_mean=scaler_mean,
-    #   input_scale=scaler_std,
-    #    nb_bins=args.nfft // 2 + 1,
-    #    max_bin=max_bin,
+    
+    # unmix = model.OpenUnmix(
+    #      input_mean=scaler_mean,
+    #      input_scale=scaler_std,
+    #      nb_bins=args.nfft // 2 + 1,
+    #      nb_channels=args.nb_channels,
+    #      hidden_size=args.hidden_size,
+    #      max_bin=1024,
     # ).to(device)
+    unmix = model.Transformer(
+        input_mean=scaler_mean,
+        input_scale=scaler_std,
+        nb_bins=args.nfft // 2 + 1,
+        nb_channels = args.nb_channels,
+        hidden_size = args.hidden_size,
+        max_bin=1024,
+    ).to(device)
 
     optimizer = torch.optim.Adam(unmix.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
